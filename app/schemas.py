@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, time
 import enum
 
 # 這裡也可定義與 DB 相同的列舉，若要做 request/response 驗證。
@@ -31,8 +31,8 @@ class Pharmacy(PharmacyBase):
 # ============ PharmacyOpeningHours ==============
 class PharmacyOpeningHoursBase(BaseModel):
     day_of_week: DayOfWeek
-    open_time: str  # 以 'HH:MM:SS' 表示
-    close_time: str
+    open_time: time  # 以 'HH:MM:SS' 表示
+    close_time: time
 
 class PharmacyOpeningHoursCreate(PharmacyOpeningHoursBase):
     pass
