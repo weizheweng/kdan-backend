@@ -13,25 +13,26 @@ DB_NAME = "KDAN"
 DB_USER = "postgres"
 DB_PASSWORD = 8510
 
-# ===【2) 建立 ENUM 與四個資料表】===
+# === 2) 建立 ENUM 與五個資料表 (無 address, phone) ===
 def create_tables():
     """
-    依需求建立:
-      1. ENUM: day_of_week_enum
-      2. pharmacies
-      3. pharmacy_opening_hours
-      4. users
-      5. purchase_histories
+    建立:
+      1. ENUM day_of_week_enum (含 'Thur')
+      2. pharmacies (id, name, cash_balance)
+      3. pharmacy_opening_hours (id, pharmacy_id, day_of_week, open_time, close_time)
+      4. masks (id, pharmacy_id, name, price)
+      5. users (id, name, cash_balance)
+      6. purchase_histories (id, user_id, pharmacy_id, mask_id, mask_name, quantity, transaction_amount, transaction_date)
     """
-    # 如果你確定要清空舊表、舊 enum，可在此先做 DROP:
-    # (請酌情決定是否要在正式環境中執行)
     drop_schema_sql = """
     DROP TABLE IF EXISTS purchase_histories CASCADE;
+    DROP TABLE IF EXISTS masks CASCADE;
     DROP TABLE IF EXISTS pharmacy_opening_hours CASCADE;
     DROP TABLE IF EXISTS pharmacies CASCADE;
     DROP TABLE IF EXISTS users CASCADE;
     DROP TYPE IF EXISTS day_of_week_enum CASCADE;
     """
+
     create_enum = """
     DO $$
     BEGIN
@@ -45,8 +46,6 @@ def create_tables():
     CREATE TABLE IF NOT EXISTS pharmacies (
         id SERIAL PRIMARY KEY,
         name VARCHAR(255) NOT NULL,
-        address VARCHAR(255),
-        phone VARCHAR(50),
         cash_balance DOUBLE PRECISION DEFAULT 0
     );
     """
@@ -58,6 +57,18 @@ def create_tables():
         day_of_week day_of_week_enum NOT NULL,
         open_time TIME NOT NULL,
         close_time TIME NOT NULL,
+        CONSTRAINT fk_pharmacy
+            FOREIGN KEY (pharmacy_id) REFERENCES pharmacies(id)
+            ON DELETE CASCADE
+    );
+    """
+
+    create_masks = """
+    CREATE TABLE IF NOT EXISTS masks (
+        id SERIAL PRIMARY KEY,
+        pharmacy_id INT NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        price DOUBLE PRECISION DEFAULT 0,
         CONSTRAINT fk_pharmacy
             FOREIGN KEY (pharmacy_id) REFERENCES pharmacies(id)
             ON DELETE CASCADE
@@ -77,7 +88,9 @@ def create_tables():
         id SERIAL PRIMARY KEY,
         user_id INT NOT NULL,
         pharmacy_id INT NOT NULL,
+        mask_id INT,
         mask_name VARCHAR(255),
+        quantity INT DEFAULT 1,
         transaction_amount DOUBLE PRECISION DEFAULT 0,
         transaction_date TIMESTAMP,
         CONSTRAINT fk_user
@@ -85,6 +98,9 @@ def create_tables():
             ON DELETE CASCADE,
         CONSTRAINT fk_pharmacy
             FOREIGN KEY (pharmacy_id) REFERENCES pharmacies(id)
+            ON DELETE CASCADE,
+        CONSTRAINT fk_mask
+            FOREIGN KEY (mask_id) REFERENCES masks(id)
             ON DELETE CASCADE
     );
     """
@@ -100,18 +116,15 @@ def create_tables():
         )
         cursor = conn.cursor()
 
-        # (可選) 先清空舊的 schema，請自行決定是否要執行
+        # 若想保留舊資料，可註解以下:
         cursor.execute(drop_schema_sql)
 
-        # 建立 ENUM
+        # 建立 enum + tables
         cursor.execute(create_enum)
-        # 建立 pharmacies
         cursor.execute(create_pharmacies)
-        # 建立 pharmacy_opening_hours
         cursor.execute(create_pharmacy_opening_hours)
-        # 建立 users
+        cursor.execute(create_masks)
         cursor.execute(create_users)
-        # 建立 purchase_histories
         cursor.execute(create_purchase_histories)
 
         conn.commit()
@@ -125,68 +138,61 @@ def create_tables():
         if conn:
             conn.close()
 
-# ===【3) 解析 openingHours，支援 "Thur"】===
+# === 3) 解析 openingHours (支援 "Thur") ===
 def parse_opening_hours(opening_str: str):
     """
-    將像 "Mon - Fri 08:00 - 17:00 / Sat, Sun 08:00 - 12:00" 或
-    "Mon, Wed, Fri 08:00 - 12:00 / Tue, Thur 14:00 - 18:00" 的字串
-    拆解成 list，每一筆包含 (day_of_week, open_time, close_time)。
-    e.g. [
-      ("Mon", "08:00:00", "17:00:00"),
-      ("Tue", "08:00:00", "17:00:00"),
-      ...
-      ("Thur", "14:00:00", "18:00:00"),
-    ]
+    範例: "Mon - Fri 08:00 - 17:00 / Sat, Sun 08:00 - 12:00"
+         "Mon, Wed, Fri 08:00 - 12:00 / Tue, Thur 14:00 - 18:00"
+    拆解成 list[ (day_of_week, open_t, close_t), ...]
+    e.g. [("Mon","08:00:00","17:00:00"), ("Tue","14:00:00","18:00:00"), ...]
     """
     segments = [seg.strip() for seg in opening_str.split("/")]
     results = []
-    # e.g. "Mon - Fri 08:00 - 17:00" or "Mon,Wed,Fri 08:00 - 12:00"
     pattern = re.compile(r"([A-Za-z,\s-]+)\s+(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})")
 
-    # 注意，我們這裡使用 'Thur' 作為星期四
     all_days = ["Mon","Tue","Wed","Thur","Fri","Sat","Sun"]
 
     def expand_days(day_part: str):
-        """
-        e.g. "Mon - Fri" => ["Mon","Tue","Wed","Thur","Fri"] (如果要連續到 Thur 也要加進來)
-             "Mon, Wed, Fri" => ["Mon","Wed","Fri"]
-             "Tue, Thur" => ["Tue","Thur"]
-        """
         day_part = day_part.strip()
         if "-" in day_part:
-            # 如 "Mon - Thur" 或 "Mon - Fri"
+            # e.g. "Mon - Thur" or "Mon - Fri"
             start_day, end_day = [d.strip() for d in day_part.split("-")]
-            start_index = all_days.index(start_day)
-            end_index = all_days.index(end_day)
-            return all_days[start_index : end_index + 1]
+            start_idx = all_days.index(start_day)
+            end_idx = all_days.index(end_day)
+            return all_days[start_idx : end_idx + 1]
         else:
-            # 如 "Sat, Sun" => ["Sat","Sun"]
-            # "Mon" => ["Mon"]
-            items = [d.strip() for d in day_part.split(",")]
-            return items
+            # e.g. "Sat, Sun" => ["Sat","Sun"]
+            return [x.strip() for x in day_part.split(",")]
 
     for seg in segments:
         m = pattern.search(seg)
         if m:
-            day_range_str = m.group(1)    # e.g. "Mon - Fri" / "Sat, Sun"
-            open_t = m.group(2) + ":00"   # "08:00" => "08:00:00"
-            close_t = m.group(3) + ":00"  # "17:00" => "17:00:00"
+            day_range_str = m.group(1)
+            open_t = m.group(2) + ":00"
+            close_t = m.group(3) + ":00"
             for d in expand_days(day_range_str):
-                # 如果 d 不在 all_days 裡，會導致 ENUM insert 失敗
-                # 可再做個檢查
-                if d not in all_days:
-                    print(f"[WARN] day_of_week '{d}' is not in the enum list. Skipped.")
-                    continue
-                results.append((d, open_t, close_t))
-
+                if d in all_days:
+                    results.append((d, open_t, close_t))
+                else:
+                    print(f"[WARN] Unrecognized day '{d}'. Skipping.")
     return results
 
-# ===【4) 匯入 pharmacies.json → pharmacies & pharmacy_opening_hours】===
+# === 4) 匯入 pharmacies.json → pharmacies, pharmacy_opening_hours, masks ===
 def import_pharmacies(pharmacies_json_path: str):
     """
-    解析 pharmacies.json, 將資料寫進:
-      - pharmacies (id, name, address, phone, cash_balance)
-      - pharmacy_opening_hours (多筆營業時間)
+    期待 JSON 結構:
+    [
+      {
+        "name": "DFW Wellness",
+        "cashBalance": 328.41,
+        "openingHours": "Mon, Wed, Fri 08:00 - 12:00 / Tue, Thur 14:00 - 18:00",
+        "masks": [
+          {"name": "MaskT (green) (10 per pack)", "price": 41.86},
+          ...
+        ]
+      },
+      ...
+    ]
     """
     conn = None
     try:
@@ -199,41 +205,50 @@ def import_pharmacies(pharmacies_json_path: str):
         )
         cursor = conn.cursor()
 
-        with open("pharmacies.json", "r", encoding="utf-8") as f:
+        with open(pharmacies_json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         inserted_count = 0
+
         for item in data:
             name = item["name"]
             cash_balance = float(item.get("cashBalance", 0))
-            address = item.get("address", "")     # 若json沒有就空字串
-            phone = item.get("phone", "")         # 同上
             opening_str = item.get("openingHours", "")
 
-            # 1) 插入 pharmacies
-            insert_pharmacy_sql = """
-                INSERT INTO pharmacies (name, address, phone, cash_balance)
-                VALUES (%s, %s, %s, %s)
+            # INSERT pharmacies
+            sql_pharmacy = """
+                INSERT INTO pharmacies (name, cash_balance)
+                VALUES (%s, %s)
                 RETURNING id
             """
-            cursor.execute(insert_pharmacy_sql, (name, address, phone, cash_balance))
+            cursor.execute(sql_pharmacy, (name, cash_balance))
             pharmacy_id = cursor.fetchone()[0]
 
-            # 2) 解析開放時間, 插入 pharmacy_opening_hours
+            # 插入營業時間
             oh_list = parse_opening_hours(opening_str)
-            for (day_of_week, open_time, close_time) in oh_list:
-                insert_oh_sql = """
+            for (dow, open_t, close_t) in oh_list:
+                sql_oh = """
                     INSERT INTO pharmacy_opening_hours
                     (pharmacy_id, day_of_week, open_time, close_time)
                     VALUES (%s, %s, %s, %s)
                 """
-                cursor.execute(insert_oh_sql, (pharmacy_id, day_of_week, open_time, close_time))
+                cursor.execute(sql_oh, (pharmacy_id, dow, open_t, close_t))
+
+            # 插入口罩
+            for m in item.get("masks", []):
+                mask_name = m["name"]
+                mask_price = float(m["price"])
+                sql_mask = """
+                    INSERT INTO masks (pharmacy_id, name, price)
+                    VALUES (%s, %s, %s)
+                """
+                cursor.execute(sql_mask, (pharmacy_id, mask_name, mask_price))
 
             inserted_count += 1
 
         conn.commit()
         cursor.close()
-        print(f"[INFO] Inserted {inserted_count} pharmacies and their opening hours.")
+        print(f"[INFO] Inserted {inserted_count} pharmacies (opening_hours, masks).")
     except Exception as e:
         print("[ERROR] Failed to import pharmacies:", e)
         if conn:
@@ -242,13 +257,26 @@ def import_pharmacies(pharmacies_json_path: str):
         if conn:
             conn.close()
 
-# ===【5) 匯入 users.json → users & purchase_histories】===
+# === 5) 匯入 users.json → users, purchase_histories ===
 def import_users(users_json_path: str):
     """
-    解析 users.json, 將資料寫進:
-      - users (id, name, cash_balance)
-      - purchase_histories (一對多)
-    其中 purchaseHistories 裡會有 pharmacyName => 需根據 pharmacies.name 找到 pharmacy_id
+    期待 JSON 結構:
+    [
+      {
+        "name": "Yvonne Guerrero",
+        "cashBalance": 191.83,
+        "purchaseHistories": [
+          {
+            "pharmacyName": "DFW Wellness",
+            "maskName": "Second Smile (black) (3 per pack)",
+            "transactionAmount": 5.28,
+            "transactionDate": "2021-01-02 10:58:40"
+          },
+          ...
+        ]
+      },
+      ...
+    ]
     """
     conn = None
     try:
@@ -261,59 +289,69 @@ def import_users(users_json_path: str):
         )
         cursor = conn.cursor()
 
-        with open("users.json", "r", encoding="utf-8") as f:
+        with open(users_json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         user_count = 0
         purchase_count = 0
 
-        for user_item in data:
-            user_name = user_item["name"]
-            user_balance = float(user_item.get("cashBalance", 0))
-            purchase_histories = user_item.get("purchaseHistories", [])
+        for u in data:
+            user_name = u["name"]
+            user_balance = float(u.get("cashBalance", 0))
+            purchase_list = u.get("purchaseHistories", [])
 
-            # 1) INSERT INTO users
-            insert_user_sql = """
+            # 新增 user
+            sql_user = """
                 INSERT INTO users (name, cash_balance)
                 VALUES (%s, %s)
                 RETURNING id
             """
-            cursor.execute(insert_user_sql, (user_name, user_balance))
+            cursor.execute(sql_user, (user_name, user_balance))
             user_id = cursor.fetchone()[0]
             user_count += 1
 
-            # 2) 逐筆插入 purchase_histories
-            for ph in purchase_histories:
+            # 新增 purchase_histories
+            for ph in purchase_list:
                 pharmacy_name = ph["pharmacyName"]
                 mask_name = ph.get("maskName", "")
-                transaction_amount = float(ph.get("transactionAmount", 0))
-                transaction_date_str = ph.get("transactionDate", "")
-                # 轉成 datetime
-                transaction_date = datetime.strptime(transaction_date_str, "%Y-%m-%d %H:%M:%S")
+                amt = float(ph.get("transactionAmount", 0))
+                dt_str = ph.get("transactionDate", "2021-01-01 00:00:00")
+                dt_obj = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
 
-                # 先查詢 pharmacy_id
-                select_pharmacy_sql = """
-                    SELECT id FROM pharmacies WHERE name = %s
-                """
-                cursor.execute(select_pharmacy_sql, (pharmacy_name,))
-                result = cursor.fetchone()
-                if not result:
-                    print(f"[WARN] Pharmacy '{pharmacy_name}' not found. Skipping this purchase.")
+                # 查找 pharmacy_id
+                sql_find_pharmacy = "SELECT id FROM pharmacies WHERE name=%s"
+                cursor.execute(sql_find_pharmacy, (pharmacy_name,))
+                row_p = cursor.fetchone()
+                if not row_p:
+                    print(f"[WARN] Pharmacy '{pharmacy_name}' not found. Skipping.")
                     continue
+                pharmacy_id = row_p[0]
 
-                pharmacy_id = result[0]
-
-                insert_purchase_sql = """
-                    INSERT INTO purchase_histories
-                    (user_id, pharmacy_id, mask_name, transaction_amount, transaction_date)
-                    VALUES (%s, %s, %s, %s, %s)
+                # 查找 mask_id
+                sql_find_mask = """
+                    SELECT id FROM masks
+                    WHERE pharmacy_id=%s AND name=%s
                 """
-                cursor.execute(insert_purchase_sql, (user_id, pharmacy_id, mask_name, transaction_amount, transaction_date))
+                cursor.execute(sql_find_mask, (pharmacy_id, mask_name))
+                row_m = cursor.fetchone()
+                if not row_m:
+                    print(f"[WARN] Mask '{mask_name}' not found under pharmacy '{pharmacy_name}'. Skipping mask_id.")
+                    mask_id = None
+                else:
+                    mask_id = row_m[0]
+
+                # 預設 quantity=1
+                sql_insert_ph = """
+                    INSERT INTO purchase_histories
+                    (user_id, pharmacy_id, mask_id, mask_name, quantity, transaction_amount, transaction_date)
+                    VALUES (%s, %s, %s, %s, 1, %s, %s)
+                """
+                cursor.execute(sql_insert_ph, (user_id, pharmacy_id, mask_id, mask_name, amt, dt_obj))
                 purchase_count += 1
 
         conn.commit()
         cursor.close()
-        print(f"[INFO] Inserted {user_count} users and {purchase_count} purchase records.")
+        print(f"[INFO] Inserted {user_count} users, {purchase_count} purchase records.")
     except Exception as e:
         print("[ERROR] Failed to import users:", e)
         if conn:
@@ -322,18 +360,17 @@ def import_users(users_json_path: str):
         if conn:
             conn.close()
 
-# ===【6) 主程式：建立表 + 從兩個 JSON 檔匯入資料】===
+# === 6) 主程式：建表 & 從JSON匯入 ===
 def main():
-    # 1) 先建表
+    # (1) 建表
     create_tables()
 
-    # 2) 匯入 pharmacies.json (裡面要使用 Thur 而非 Thu)
-    import_pharmacies("data/pharmacies.json")
+    # (2) 匯入 pharmacies.json
+    import_pharmacies("pharmacies.json")
 
-    # 3) 匯入 users.json
-    import_users("data/users.json")
+    # (3) 匯入 users.json
+    import_users("users.json")
 
 
 if __name__ == "__main__":
     main()
-

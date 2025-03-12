@@ -1,9 +1,9 @@
-from pydantic import BaseModel
+# app/schemas.py
+from pydantic import BaseModel, Field
 from typing import List, Optional
 from datetime import datetime, time
 import enum
 
-# 這裡也可定義與 DB 相同的列舉，若要做 request/response 驗證。
 class DayOfWeek(str, enum.Enum):
     Mon = "Mon"
     Tue = "Tue"
@@ -13,29 +13,20 @@ class DayOfWeek(str, enum.Enum):
     Sat = "Sat"
     Sun = "Sun"
 
-# ============ Pharmacy Schemas ==============
+# ---- Pharmacy & Opening Hours ----
 class PharmacyBase(BaseModel):
     name: str
-    address: Optional[str] = None
-    phone: Optional[str] = None
     cash_balance: float = 0
-
-class PharmacyCreate(PharmacyBase):
-    pass
 
 class Pharmacy(PharmacyBase):
     id: int
     class Config:
         orm_mode = True
 
-# ============ PharmacyOpeningHours ==============
 class PharmacyOpeningHoursBase(BaseModel):
     day_of_week: DayOfWeek
-    open_time: time  # 以 'HH:MM:SS' 表示
+    open_time: time
     close_time: time
-
-class PharmacyOpeningHoursCreate(PharmacyOpeningHoursBase):
-    pass
 
 class PharmacyOpeningHours(PharmacyOpeningHoursBase):
     id: int
@@ -43,31 +34,51 @@ class PharmacyOpeningHours(PharmacyOpeningHoursBase):
     class Config:
         orm_mode = True
 
-# ============ User Schemas ==============
+# ---- Mask ----
+class MaskBase(BaseModel):
+    name: str
+    price: float
+
+class Mask(MaskBase):
+    id: int
+    pharmacy_id: int
+    class Config:
+        orm_mode = True
+
+# ---- User & PurchaseHistory ----
 class UserBase(BaseModel):
     name: str
     cash_balance: float = 0
-
-class UserCreate(UserBase):
-    pass
 
 class User(UserBase):
     id: int
     class Config:
         orm_mode = True
 
-# ============ PurchaseHistory ==============
 class PurchaseHistoryBase(BaseModel):
     pharmacy_id: int
-    mask_name: str
+    mask_id: Optional[int] = None
+    mask_name: Optional[str] = None
+    quantity: int = 1
     transaction_amount: float
     transaction_date: datetime
-
-class PurchaseHistoryCreate(PurchaseHistoryBase):
-    pass
 
 class PurchaseHistory(PurchaseHistoryBase):
     id: int
     user_id: int
     class Config:
         orm_mode = True
+
+# ---- Special Query schemas ----
+class DateRange(BaseModel):
+    start_date: datetime
+    end_date: datetime
+
+class TopSpendersResponse(BaseModel):
+    user_id: int
+    user_name: str
+    total_spent: float
+
+class TransactionSummary(BaseModel):
+    total_masks: int
+    total_dollar: float

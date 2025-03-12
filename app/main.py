@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from .database import Base, engine
-from .routers import pharmacies, users
+from .routers import pharmacies, users, search
 
 # 若想在首次啟動時自動建表 (僅開發環境建議)
 # 不建議生產環境自動執行，避免破壞既有資料
@@ -15,3 +15,4 @@ app = FastAPI(
 # 將路由掛進主 app
 app.include_router(pharmacies.router)
 app.include_router(users.router)
+app.include_router(search.router)
