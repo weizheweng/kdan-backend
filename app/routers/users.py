@@ -27,55 +27,91 @@ def get_user_purchases(user_id: int, db: Session = Depends(get_db)):
     return u.purchase_histories
 
 @router.post("/{user_id}/purchase")
-def purchase_mask(user_id: int, body: PurchaseHistoryBase, db: Session = Depends(get_db)):
+def purchase_masks(
+    user_id: int,
+    items: List[PurchaseHistoryBase],
+    db: Session = Depends(get_db)
+):
     """
-    Process a user purchases a mask from a pharmacy (atomic).
-    - Check user balance
-    - Check mask / pharmacy
-    - user.cash_balance -= (transaction_amount)
-    - pharmacy.cash_balance += (transaction_amount)
-    - Insert purchase_histories
+    接收多筆購買資料，一次性處理：
+    [
+      {
+        "pharmacy_id": 3,
+        "mask_id": 10,
+        "mask_name": "MaskT (green) (10 per pack)",
+        "quantity": 2,
+        "transaction_amount": 80.0,
+        "transaction_date": "2023-01-01T10:00:00"
+      },
+      {
+        "pharmacy_id": 3,
+        "mask_id": 11,
+        "mask_name": "MaskT (blue) (10 per pack)",
+        "quantity": 1,
+        "transaction_amount": 40.0,
+        "transaction_date": "2023-01-01T10:00:00"
+      },
+      ...
+    ]
+    要求：
+    1. 扣除 user.cash_balance
+    2. 增加 pharmacy.cash_balance
+    3. 新增 purchase_histories
+    4. 如果任何一筆購買失敗，全部回滾(atomic)
     """
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    pharmacy = db.query(Pharmacy).filter(Pharmacy.id == body.pharmacy_id).first()
-    if not pharmacy:
-        raise HTTPException(status_code=404, detail="Pharmacy not found")
+    # 計算「所有購買」所需總金額
+    total_amount_needed = sum(item.transaction_amount for item in items)
+    if user.cash_balance < total_amount_needed:
+        raise HTTPException(status_code=400, detail="User balance not enough for total purchase")
 
-    # 如果帶了 mask_id，就檢查對應 mask
-    selected_mask = None
-    if body.mask_id:
-        selected_mask = db.query(Mask).filter(Mask.id == body.mask_id, Mask.pharmacy_id == pharmacy.id).first()
-        if not selected_mask:
-            raise HTTPException(status_code=404, detail="Mask not found in this pharmacy")
+    # 開始交易
+    try:
+        # 逐筆檢查 & 寫入
+        for item in items:
+            # 找該筆的藥局
+            pharmacy = db.query(Pharmacy).filter(Pharmacy.id == item.pharmacy_id).first()
+            if not pharmacy:
+                raise HTTPException(status_code=404, detail=f"Pharmacy id={item.pharmacy_id} not found")
 
-    # 檢查餘額
-    total_price = body.transaction_amount
-    if user.cash_balance < total_price:
-        raise HTTPException(status_code=400, detail="Insufficient user balance")
+            # 若有 mask_id，檢查是否存在
+            if item.mask_id:
+                m = db.query(Mask).filter(Mask.id == item.mask_id, Mask.pharmacy_id == pharmacy.id).first()
+                if not m:
+                    raise HTTPException(status_code=404, detail=f"Mask id={item.mask_id} not found in pharmacy {item.pharmacy_id}")
 
-    # 在同一 transaction 中更新
-    user.cash_balance -= total_price
-    pharmacy.cash_balance += total_price
+            # 核銷餘額
+            user.cash_balance -= item.transaction_amount
+            pharmacy.cash_balance += item.transaction_amount
 
-    new_purchase = PurchaseHistory(
-        user_id=user.id,
-        pharmacy_id=pharmacy.id,
-        mask_id=body.mask_id,
-        mask_name=body.mask_name,
-        quantity=body.quantity,
-        transaction_amount=total_price,
-        transaction_date=body.transaction_date
-    )
-    db.add(new_purchase)
-    db.commit()
-    db.refresh(user)
-    db.refresh(pharmacy)
-    db.refresh(new_purchase)
+            # 建立 purchase_histories
+            new_record = PurchaseHistory(
+                user_id=user.id,
+                pharmacy_id=pharmacy.id,
+                mask_id=item.mask_id,
+                mask_name=item.mask_name,
+                quantity=item.quantity,
+                transaction_amount=item.transaction_amount,
+                transaction_date=item.transaction_date
+            )
+            db.add(new_record)
 
-    return {"message": "Purchase successful", "purchase_id": new_purchase.id}
+        db.commit()
+        db.refresh(user)
+        # 也可 refresh 所有 pharmacy, new_record ...
+
+    except HTTPException:
+        # 如果是 HTTPException => 仍要 rollback
+        db.rollback()
+        raise
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error: {e}")
+
+    return {"message": "Purchases processed successfully"}
 
 @router.get("/top_spenders", response_model=List[TopSpendersResponse])
 def top_spenders(start_date: datetime, end_date: datetime, top_x: int, db: Session = Depends(get_db)):

@@ -90,3 +90,11 @@ def filter_pharmacies_mask_count(
         raise HTTPException(status_code=400, detail="count_op must be 'gt' or 'lt'")
 
     return query.all()
+
+
+@router.get("/all_masks", response_model=List[MaskSchema])
+def list_all_masks(db: Session = Depends(get_db)):
+    """
+    撈全部藥局的口罩 (即 masks 表內所有資料)
+    """
+    return db.query(Mask).all()
